@@ -1,8 +1,11 @@
 import FullscreenIcon from "@mui/icons-material/Fullscreen";
+import PersonalVideoIcon from "@mui/icons-material/PersonalVideo";
+import PhoneDisabledIcon from "@mui/icons-material/PhoneDisabled";
 import SearchIcon from "@mui/icons-material/Search";
 import SubjectIcon from "@mui/icons-material/Subject";
-import VideoCallIcon from "@mui/icons-material/VideoCall";
+import TabIcon from "@mui/icons-material/Tab";
 import AspectRatio from "@mui/joy/AspectRatio";
+import Button from "@mui/joy/Button";
 import Card from "@mui/joy/Card";
 import CardContent from "@mui/joy/CardContent";
 import CardCover from "@mui/joy/CardCover";
@@ -21,9 +24,12 @@ import {
   useTheme,
 } from "@mui/material/styles";
 import Toolbar from "@mui/material/Toolbar";
+import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import Head from "next/head";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import Peer from "simple-peer";
+import { io } from "socket.io-client";
 
 const drawerWidth = 260;
 
@@ -130,13 +136,247 @@ const StyledFab = styled(Fab)({
   margin: "0 auto",
 });
 
+const StyledFabWebCam = styled(Fab)({
+  position: "absolute",
+  zIndex: 1,
+  top: -30,
+  left: -90,
+  right: 0,
+  margin: "0 auto",
+});
+
+const StyledFabScreen = styled(Fab)({
+  position: "absolute",
+  zIndex: 1,
+  top: -30,
+  left: 0,
+  right: -90,
+  margin: "0 auto",
+});
+
+const socket = io("http://localhost:5000", {
+  autoConnect: false,
+});
+
 export default function Home() {
   const theme = useTheme();
   const [open, setOpen] = useState(false);
+  const [isConn, setIsConn] = useState(false);
+  const [isInit, setIsInit] = useState();
+  const [stream, setStream] = useState();
+  const [remote, setRemote] = useState([]);
+
+  const mainScrRef = useRef();
+  const listScrRef = useRef([]);
+
+  const handleTrackEnd = () => {
+    setIsInit(false);
+    setStream(undefined);
+    setRemote(remote.filter((p) => p.id !== socket.id));
+  };
 
   const handleDrawer = () => {
     setOpen(!open);
   };
+
+  useEffect(() => {
+    socket.connect();
+
+    function onConnect() {
+      setIsConn(true);
+    }
+
+    function onDisconnect() {
+      setIsConn(false);
+    }
+
+    socket.on("connect", onConnect);
+    socket.on("disconnect", onDisconnect);
+
+    return () => {
+      socket.off("connect", onConnect);
+      socket.off("disconnect", onDisconnect);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isConn) {
+      return;
+    }
+
+    if (isInit) {
+      socket.emit("stream");
+    }
+  }, [isConn, isInit]);
+
+  useEffect(() => {
+    if (!isConn) {
+      return;
+    }
+
+    function onStream(id) {
+      const peer = new Peer({
+        initiator: true,
+        stream,
+      });
+
+      peer.on("signal", (s) => {
+        socket.emit("signal", id, s);
+      });
+
+      peer.on("stream", (data) => {
+        const v = listScrRef.current.find(
+          (ref) => ref && ref.id === id
+        );
+        if (v) {
+          v.srcObject = data;
+        }
+      });
+
+      peer.on("connect", () => {
+        setNotify({
+          isOpen: true,
+          msg: `${id} is streaming`,
+        });
+      });
+
+      const index = remote.findIndex((p) => p.id === id);
+      if (index > -1) {
+        remote[index] = {
+          id,
+          init: true,
+          peer,
+        };
+        setRemote([...remote]);
+        return;
+      }
+
+      setRemote([
+        {
+          init: true,
+          id,
+          peer,
+        },
+        ...remote,
+      ]);
+    }
+
+    socket.on("stream", onStream);
+
+    if (!isInit && stream) {
+      setRemote([
+        {
+          init: true,
+          id: socket.id,
+          peer: new Peer(),
+        },
+        ...remote,
+      ]);
+      setIsInit(true);
+    }
+
+    return () => {
+      socket.off("stream", onStream);
+    };
+  }, [isConn, isInit, remote, stream]);
+
+  useEffect(() => {
+    if (!isConn) {
+      return;
+    }
+
+    function onSignal(id, s) {
+      const p = remote.find((p) => p.id === id);
+      if (p) {
+        p.peer.signal(s);
+      }
+    }
+
+    function onOff(id) {
+      setRemote(remote.filter((p) => p.id !== id));
+    }
+
+    socket.on("signal", onSignal);
+    socket.on("off", onOff);
+
+    if (remote.length) {
+      if (remote[0].id === socket.id) {
+        let vid = listScrRef.current.find(
+          (v) => v.id === socket.id
+        );
+        if (vid) {
+          vid.srcObject = mainScrRef.current.srcObject;
+        }
+      }
+    }
+
+    return () => {
+      socket.off("signal", onSignal);
+      socket.off("off", onOff);
+    };
+  }, [isConn, remote]);
+
+  useEffect(() => {
+    if (!isConn) {
+      return;
+    }
+
+    if (stream) {
+      const track = stream.getVideoTracks()[0];
+      if (track) {
+        track.addEventListener("ended", handleTrackEnd);
+        return () => {
+          track.removeEventListener(
+            "ended",
+            handleTrackEnd
+          );
+        };
+      }
+    }
+  }, [isConn, stream]);
+
+  const handleStreamScreen = async () => {
+    const getStream = async () => {
+      const stream =
+        await navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          audio: true,
+        });
+
+      mainScrRef.current.srcObject = stream;
+
+      return stream;
+    };
+
+    setStream(await getStream());
+  };
+
+  const handleStopStream = () => {
+    stream.getTracks().forEach((t) => t.stop());
+    handleTrackEnd();
+  };
+
+  if (!isConn) {
+    return (
+      <div
+        style={{
+          width: "100%",
+          height: "100%",
+          position: "fixed",
+          display: "flex",
+          justifyContent: "center",
+        }}
+      >
+        <Button
+          loading
+          loadingPosition="start"
+          variant="plain"
+        >
+          Connecting socket...
+        </Button>
+      </div>
+    );
+  }
 
   return (
     <>
@@ -172,9 +412,41 @@ export default function Home() {
             >
               Meeting App
             </Typography>
-            <StyledFab color="secondary" aria-label="add">
-              <VideoCallIcon />
-            </StyledFab>
+            {isInit ? (
+              <StyledFab
+                color="error"
+                aria-label="close"
+                onClick={handleStopStream}
+              >
+                <PhoneDisabledIcon />
+              </StyledFab>
+            ) : (
+              <>
+                <Tooltip
+                  title="Share camera"
+                  placement="top"
+                >
+                  <StyledFabWebCam
+                    color="success"
+                    aria-label="webcam"
+                  >
+                    <PersonalVideoIcon />
+                  </StyledFabWebCam>
+                </Tooltip>
+                <Tooltip
+                  title="Share screen"
+                  placement="top"
+                >
+                  <StyledFabScreen
+                    color="success"
+                    aria-label="screen"
+                    onClick={handleStreamScreen}
+                  >
+                    <TabIcon />
+                  </StyledFabScreen>
+                </Tooltip>
+              </>
+            )}
             <IconButton
               color="inherit"
               aria-label="open drawer"
@@ -187,7 +459,6 @@ export default function Home() {
         </AppBar>
         <Main
           open={open}
-          disablePadding
           sx={{
             height: `calc(100vh - ${theme.spacing(10)})`,
             display: "flex",
@@ -206,17 +477,7 @@ export default function Home() {
             variant="outlined"
           >
             <CardCover>
-              <video
-                autoPlay
-                loop
-                muted
-                poster="https://assets.codepen.io/6093409/river.jpg"
-              >
-                <source
-                  src="https://assets.codepen.io/6093409/river.mp4"
-                  type="video/mp4"
-                />
-              </video>
+              <video ref={mainScrRef} autoPlay muted />
             </CardCover>
           </Card>
         </Main>
@@ -249,59 +510,50 @@ export default function Home() {
               position: "relative",
             }}
           >
-            {[
-              "All mail",
-              "Trash",
-              "Spam",
-              "hello",
-              "world",
-              "1",
-              "2",
-              "3",
-            ].map((text) => (
-              <ListItem key={text} disablePadding>
-                <Card
-                  sx={{
-                    width: "100%",
-                    mb: 1,
-                    mx: 0.5,
-                    bgcolor: "initial",
-                    boxShadow: "none",
-                    "--Card-padding": "0px",
-                  }}
-                  variant="outlined"
-                >
-                  <AspectRatio sx={{ width: "100%" }}>
-                    <CardCover>
-                      <img
-                        src="https://images.unsplash.com/photo-1542773998-9325f0a098d7?auto=format&fit=crop&w=320"
-                        srcSet="https://images.unsplash.com/photo-1542773998-9325f0a098d7?auto=format&fit=crop&w=320&dpr=2 2x"
-                        loading="lazy"
-                        alt=""
-                      />
-                    </CardCover>
-                    <CardCover
-                      sx={{
-                        background:
-                          "linear-gradient(to top, rgba(0,0,0,0.4), rgba(0,0,0,0) 200px), linear-gradient(to top, rgba(0,0,0,0.8), rgba(0,0,0,0) 300px)",
-                      }}
-                    />
-                    <CardContent
-                      sx={{ justifyContent: "flex-end" }}
-                    >
-                      <Typography
-                        level="h2"
-                        fontSize="lg"
-                        textColor="#fff"
-                        mb={1}
+            {remote
+              .filter(({ init }) => init)
+              .map(({ id }) => (
+                <ListItem key={id} disablePadding>
+                  <Card
+                    sx={{
+                      width: "100%",
+                      mb: 1,
+                      mx: 0.5,
+                      bgcolor: "initial",
+                      boxShadow: "none",
+                      "--Card-padding": "0px",
+                    }}
+                    variant="outlined"
+                  >
+                    <AspectRatio sx={{ width: "100%" }}>
+                      <CardCover>
+                        <video
+                          id={id}
+                          ref={(ref) =>
+                            (listScrRef.current = [
+                              ref,
+                              ...listScrRef.current,
+                            ])
+                          }
+                          autoPlay
+                          muted
+                        />
+                      </CardCover>
+                      <CardContent
+                        sx={{ justifyContent: "flex-end" }}
                       >
-                        Yosemite National Park
-                      </Typography>
-                    </CardContent>
-                  </AspectRatio>
-                </Card>
-              </ListItem>
-            ))}
+                        <Typography
+                          level="h2"
+                          fontSize="lg"
+                          mb={1}
+                        >
+                          Yosemite National Park
+                        </Typography>
+                      </CardContent>
+                    </AspectRatio>
+                  </Card>
+                </ListItem>
+              ))}
           </List>
         </Drawer>
       </Box>
