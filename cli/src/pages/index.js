@@ -172,7 +172,7 @@ const StyledFabScreen = styled(Fab)({
   margin: "0 auto",
 });
 
-const socket = io("http://localhost:5000", {
+const socket = io("https://meeting-server.onrender.com", {
   autoConnect: false,
 });
 
