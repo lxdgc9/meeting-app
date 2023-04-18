@@ -34,5 +34,6 @@ wss.on("connection", async (ws) => {
 
   ws.on("disconnect", () => {
     log("dis:", ws.id);
+    ws.broadcast.emit("destroy", ws.id);
   });
 });

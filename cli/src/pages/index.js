@@ -11,6 +11,7 @@ import CardCover from "@mui/joy/CardCover";
 import CardOverflow from "@mui/joy/CardOverflow";
 import Typography from "@mui/joy/Typography";
 import { Fab } from "@mui/material";
+import MuiAlert from "@mui/material/Alert";
 import MuiAppBar from "@mui/material/AppBar";
 import Box from "@mui/material/Box";
 import Divider from "@mui/material/Divider";
@@ -19,6 +20,7 @@ import IconButton from "@mui/material/IconButton";
 import InputBase from "@mui/material/InputBase";
 import List from "@mui/material/List";
 import ListItem from "@mui/material/ListItem";
+import Snackbar from "@mui/material/Snackbar";
 import {
   alpha,
   styled,
@@ -27,9 +29,25 @@ import {
 import Toolbar from "@mui/material/Toolbar";
 import Tooltip from "@mui/material/Tooltip";
 import Head from "next/head";
-import { useEffect, useRef, useState } from "react";
+import {
+  forwardRef,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import Peer from "simple-peer";
 import { io } from "socket.io-client";
+
+const Alert = forwardRef(function Alert(props, ref) {
+  return (
+    <MuiAlert
+      elevation={6}
+      ref={ref}
+      variant="filled"
+      {...props}
+    />
+  );
+});
 
 const drawerWidth = 260;
 
@@ -160,23 +178,32 @@ const socket = io("http://localhost:5000", {
 
 export default function Home() {
   const theme = useTheme();
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
   const [isConn, setIsConn] = useState(false);
   const [isInit, setIsInit] = useState();
   const [stream, setStream] = useState();
   const [remote, setRemote] = useState([]);
   const [isStream, setIsStream] = useState(false);
+  const [notify, setNotify] = useState({});
 
   const mainScrRef = useRef();
   const listScrRef = useRef([]);
 
   const handleTrackEnd = () => {
     setIsInit(false);
+    setIsStream(false);
     setStream(undefined);
     setRemote(remote.filter((p) => p.id !== socket.id));
+
+    remote.forEach((r) => {
+      r.peer.removeStream(stream);
+    });
+
+    socket.emit("down");
   };
 
   const handleDrawer = () => {
+    localStorage.setItem("open", !open);
     setOpen(!open);
   };
 
@@ -201,6 +228,10 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    setOpen(localStorage.getItem("open") === "true");
+  }, []);
+
+  useEffect(() => {
     function onNodes(nodes) {
       setRemote(
         nodes.map(({ id, init }) => {
@@ -211,13 +242,20 @@ export default function Home() {
           });
 
           peer.on("stream", (data) => {
-            console.log("on stream");
             const v = listScrRef.current.find(
               (ref) => ref && ref.id === id
             );
             if (v) {
               v.srcObject = data;
             }
+          });
+
+          peer.on("end", () => {
+            console.log("end");
+          });
+
+          peer.on("close", () => {
+            console.log("close");
           });
 
           return { id, init, peer };
@@ -252,7 +290,6 @@ export default function Home() {
     }
 
     function onPeer(id) {
-      console.log("on peer", id, remote);
       const peer = new Peer({ initiator: true, stream });
 
       peer.on("signal", (s) => {
@@ -260,13 +297,26 @@ export default function Home() {
       });
 
       peer.on("stream", (data) => {
-        console.log("on stream");
+        setNotify({
+          isOpen: true,
+          type: "info",
+          msg: `${id} on stream`,
+        });
+
         const v = listScrRef.current.find(
           (ref) => ref && ref.id === id
         );
         if (v) {
           v.srcObject = data;
         }
+      });
+
+      peer.on("end", () => {
+        console.log("end");
+      });
+
+      peer.on("close", () => {
+        console.log("close");
       });
 
       setRemote([{ id, init: false, peer }, ...remote]);
@@ -281,12 +331,21 @@ export default function Home() {
     }
 
     function onDown(id) {
+      const r = remote.find((r) => r.id === id);
+      if (r) {
+        r.init = false;
+      }
+      setRemote([...remote]);
+    }
+
+    function onDestroy(id) {
       setRemote(remote.filter((r) => r.id !== id));
     }
 
     socket.on("peer", onPeer);
     socket.on("up", onUp);
     socket.on("down", onDown);
+    socket.on("destroy", onDestroy);
 
     if (!isInit && stream) {
       setRemote([
@@ -304,6 +363,7 @@ export default function Home() {
       socket.off("peer", onPeer);
       socket.off("up", onUp);
       socket.off("down", onDown);
+      socket.off("destroy", onDestroy);
     };
   }, [isConn, isInit, remote, stream]);
 
@@ -372,6 +432,30 @@ export default function Home() {
     setStream(await getStream());
   };
 
+  const handleStreamCamera = async () => {
+    const getStream = async () => {
+      try {
+        const stream =
+          await navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: true,
+          });
+
+        mainScrRef.current.srcObject = stream;
+
+        return stream;
+      } catch {
+        setNotify({
+          isOpen: true,
+          type: "error",
+          msg: "Can't get device",
+        });
+      }
+    };
+
+    setStream(await getStream());
+  };
+
   const handleStopStream = () => {
     stream.getTracks().forEach((t) => t.stop());
     handleTrackEnd();
@@ -384,6 +468,10 @@ export default function Home() {
     if (v) {
       mainScrRef.current.srcObject = v.srcObject;
     }
+  };
+
+  const handleCloseNotify = () => {
+    setNotify({ ...notify, isOpen: false });
   };
 
   if (!isConn) {
@@ -422,6 +510,23 @@ export default function Home() {
         />
         <link rel="icon" href="/favicon.ico" />
       </Head>
+      <Snackbar
+        open={notify.isOpen}
+        autoHideDuration={3000}
+        anchorOrigin={{
+          vertical: "top",
+          horizontal: "left",
+        }}
+        onClose={handleCloseNotify}
+      >
+        <Alert
+          onClose={handleCloseNotify}
+          severity={notify.type}
+          sx={{ width: "100%" }}
+        >
+          {notify.msg}
+        </Alert>
+      </Snackbar>
       <Box
         sx={{
           display: "flex",
@@ -435,7 +540,6 @@ export default function Home() {
         >
           <Toolbar>
             <Typography
-              variant="h6"
               noWrap
               sx={{ flexGrow: 1 }}
               component="div"
@@ -461,6 +565,7 @@ export default function Home() {
                   <StyledFabWebCam
                     color="success"
                     aria-label="webcam"
+                    onClick={handleStreamCamera}
                   >
                     <PersonalVideoIcon />
                   </StyledFabWebCam>
