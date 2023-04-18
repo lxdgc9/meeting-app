@@ -247,6 +247,9 @@ export default function Home() {
             );
             if (v) {
               v.srcObject = data;
+              v.addEventListener("loadedmetadata", () => {
+                v.play();
+              });
             }
           });
 
@@ -308,6 +311,9 @@ export default function Home() {
         );
         if (v) {
           v.srcObject = data;
+          v.addEventListener("loadedmetadata", () => {
+            v.play();
+          });
         }
       });
 
@@ -335,6 +341,7 @@ export default function Home() {
       if (r) {
         r.init = false;
       }
+
       setRemote([...remote]);
     }
 
