@@ -13,7 +13,7 @@ wss.on("connection", async (ws) => {
     "nodes",
     (await wss.sockets.fetchSockets()).reduce(
       (a, { id, init }) =>
-        init ? [...a, { id, init: !!init }] : a,
+        ws.id !== id ? [...a, { id, init: !!init }] : a,
       []
     )
   );

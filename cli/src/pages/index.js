@@ -7,8 +7,9 @@ import TabIcon from "@mui/icons-material/Tab";
 import AspectRatio from "@mui/joy/AspectRatio";
 import Button from "@mui/joy/Button";
 import Card from "@mui/joy/Card";
-import CardContent from "@mui/joy/CardContent";
 import CardCover from "@mui/joy/CardCover";
+import CardOverflow from "@mui/joy/CardOverflow";
+import Typography from "@mui/joy/Typography";
 import { Fab } from "@mui/material";
 import MuiAppBar from "@mui/material/AppBar";
 import Box from "@mui/material/Box";
@@ -25,7 +26,6 @@ import {
 } from "@mui/material/styles";
 import Toolbar from "@mui/material/Toolbar";
 import Tooltip from "@mui/material/Tooltip";
-import Typography from "@mui/material/Typography";
 import Head from "next/head";
 import { useEffect, useRef, useState } from "react";
 import Peer from "simple-peer";
@@ -160,11 +160,12 @@ const socket = io("http://localhost:5000", {
 
 export default function Home() {
   const theme = useTheme();
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(true);
   const [isConn, setIsConn] = useState(false);
   const [isInit, setIsInit] = useState();
   const [stream, setStream] = useState();
   const [remote, setRemote] = useState([]);
+  const [isStream, setIsStream] = useState(false);
 
   const mainScrRef = useRef();
   const listScrRef = useRef([]);
@@ -200,31 +201,66 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (!isConn) {
-      return;
+    function onNodes(nodes) {
+      setRemote(
+        nodes.map(({ id, init }) => {
+          const peer = new Peer({ stream });
+
+          peer.on("signal", (s) => {
+            socket.emit("signal", id, s);
+          });
+
+          peer.on("stream", (data) => {
+            console.log("on stream");
+            const v = listScrRef.current.find(
+              (ref) => ref && ref.id === id
+            );
+            if (v) {
+              v.srcObject = data;
+            }
+          });
+
+          return { id, init, peer };
+        })
+      );
     }
 
-    if (isInit) {
-      socket.emit("stream");
-    }
-  }, [isConn, isInit]);
+    socket.on("nodes", onNodes);
+
+    return () => {
+      socket.off("nodes", onNodes);
+    };
+  }, [stream]);
 
   useEffect(() => {
     if (!isConn) {
       return;
     }
 
-    function onStream(id) {
-      const peer = new Peer({
-        initiator: true,
-        stream,
+    if (isInit && !isStream) {
+      remote.forEach((r) => {
+        r.peer.addStream(stream);
       });
+      socket.emit("up");
+      setIsStream(true);
+    }
+  }, [isConn, isInit, isStream, remote, stream]);
+
+  useEffect(() => {
+    if (!isConn) {
+      return;
+    }
+
+    function onPeer(id) {
+      console.log("on peer", id, remote);
+      const peer = new Peer({ initiator: true, stream });
 
       peer.on("signal", (s) => {
         socket.emit("signal", id, s);
       });
 
       peer.on("stream", (data) => {
+        console.log("on stream");
         const v = listScrRef.current.find(
           (ref) => ref && ref.id === id
         );
@@ -233,41 +269,30 @@ export default function Home() {
         }
       });
 
-      peer.on("connect", () => {
-        setNotify({
-          isOpen: true,
-          msg: `${id} is streaming`,
-        });
-      });
-
-      const index = remote.findIndex((p) => p.id === id);
-      if (index > -1) {
-        remote[index] = {
-          id,
-          init: true,
-          peer,
-        };
-        setRemote([...remote]);
-        return;
-      }
-
-      setRemote([
-        {
-          init: true,
-          id,
-          peer,
-        },
-        ...remote,
-      ]);
+      setRemote([{ id, init: false, peer }, ...remote]);
     }
 
-    socket.on("stream", onStream);
+    function onUp(id) {
+      const r = remote.find((r) => r.id === id);
+      if (r) {
+        r.init = true;
+        setRemote([...remote]);
+      }
+    }
+
+    function onDown(id) {
+      setRemote(remote.filter((r) => r.id !== id));
+    }
+
+    socket.on("peer", onPeer);
+    socket.on("up", onUp);
+    socket.on("down", onDown);
 
     if (!isInit && stream) {
       setRemote([
         {
-          init: true,
           id: socket.id,
+          init: true,
           peer: new Peer(),
         },
         ...remote,
@@ -276,7 +301,9 @@ export default function Home() {
     }
 
     return () => {
-      socket.off("stream", onStream);
+      socket.off("peer", onPeer);
+      socket.off("up", onUp);
+      socket.off("down", onDown);
     };
   }, [isConn, isInit, remote, stream]);
 
@@ -286,18 +313,13 @@ export default function Home() {
     }
 
     function onSignal(id, s) {
-      const p = remote.find((p) => p.id === id);
-      if (p) {
-        p.peer.signal(s);
+      const r = remote.find((r) => r.id === id);
+      if (r) {
+        r.peer.signal(s);
       }
     }
 
-    function onOff(id) {
-      setRemote(remote.filter((p) => p.id !== id));
-    }
-
     socket.on("signal", onSignal);
-    socket.on("off", onOff);
 
     if (remote.length) {
       if (remote[0].id === socket.id) {
@@ -312,7 +334,6 @@ export default function Home() {
 
     return () => {
       socket.off("signal", onSignal);
-      socket.off("off", onOff);
     };
   }, [isConn, remote]);
 
@@ -354,6 +375,15 @@ export default function Home() {
   const handleStopStream = () => {
     stream.getTracks().forEach((t) => t.stop());
     handleTrackEnd();
+  };
+
+  const selectScr = (id) => {
+    const v = listScrRef.current.find(
+      (ref) => ref && ref.id === id
+    );
+    if (v) {
+      mainScrRef.current.srcObject = v.srcObject;
+    }
   };
 
   if (!isConn) {
@@ -410,16 +440,18 @@ export default function Home() {
               sx={{ flexGrow: 1 }}
               component="div"
             >
-              Meeting App
+              ID: {socket.id}
             </Typography>
             {isInit ? (
-              <StyledFab
-                color="error"
-                aria-label="close"
-                onClick={handleStopStream}
-              >
-                <PhoneDisabledIcon />
-              </StyledFab>
+              <Tooltip title="Close" placement="top">
+                <StyledFab
+                  color="error"
+                  aria-label="close"
+                  onClick={handleStopStream}
+                >
+                  <PhoneDisabledIcon />
+                </StyledFab>
+              </Tooltip>
             ) : (
               <>
                 <Tooltip
@@ -505,55 +537,47 @@ export default function Home() {
             </Search>
           </DrawerHeader>
           <Divider />
-          <List
-            sx={{
-              position: "relative",
-            }}
-          >
-            {remote
-              .filter(({ init }) => init)
-              .map(({ id }) => (
-                <ListItem key={id} disablePadding>
-                  <Card
-                    sx={{
-                      width: "100%",
-                      mb: 1,
-                      mx: 0.5,
-                      bgcolor: "initial",
-                      boxShadow: "none",
-                      "--Card-padding": "0px",
-                    }}
-                    variant="outlined"
-                  >
-                    <AspectRatio sx={{ width: "100%" }}>
-                      <CardCover>
-                        <video
-                          id={id}
-                          ref={(ref) =>
-                            (listScrRef.current = [
-                              ref,
-                              ...listScrRef.current,
-                            ])
-                          }
-                          autoPlay
-                          muted
-                        />
-                      </CardCover>
-                      <CardContent
-                        sx={{ justifyContent: "flex-end" }}
-                      >
-                        <Typography
-                          level="h2"
-                          fontSize="lg"
-                          mb={1}
+          <List>
+            {remote.reduce(
+              (a, { id, init }) =>
+                init
+                  ? [
+                      ...a,
+                      <ListItem key={id} disablePadding>
+                        <Card
+                          sx={{
+                            width: "100%",
+                            mb: 1,
+                            mx: 1,
+                          }}
+                          onClick={() => selectScr(id)}
                         >
-                          Yosemite National Park
-                        </Typography>
-                      </CardContent>
-                    </AspectRatio>
-                  </Card>
-                </ListItem>
-              ))}
+                          <CardOverflow>
+                            <AspectRatio ratio="2">
+                              <video
+                                id={id}
+                                ref={(ref) =>
+                                  (listScrRef.current = [
+                                    ref,
+                                    ...listScrRef.current,
+                                  ])
+                                }
+                                autoPlay
+                              />
+                            </AspectRatio>
+                          </CardOverflow>
+                          <Typography
+                            level="body2"
+                            sx={{ mt: 2 }}
+                          >
+                            Id: {id}
+                          </Typography>
+                        </Card>
+                      </ListItem>,
+                    ]
+                  : a,
+              []
+            )}
           </List>
         </Drawer>
       </Box>
